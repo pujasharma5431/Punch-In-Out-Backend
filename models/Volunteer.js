@@ -12,6 +12,8 @@ const volunteerSchema = new mongoose.Schema(
     punchOut:  { type: Date,   default: null },
     duration:  { type: String, default: null },   // e.g. "1h 23m 45s"
     date:      { type: String },                  // localeDateString for easy filtering
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null }
   },
   { timestamps: true }   // adds createdAt / updatedAt automatically
 );

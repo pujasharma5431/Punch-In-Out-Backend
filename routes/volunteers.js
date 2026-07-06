@@ -29,8 +29,13 @@ function calcDuration(inDate, outDate) {
 router.get('/', async (req, res) => {
   try {
     const filter = {};
-    if (req.query.status === 'active')    filter.punchOut = null;
-    if (req.query.status === 'completed') filter.punchOut = { $ne: null };
+    if (req.query.status === 'trash') {
+      filter.isDeleted = true;
+    } else {
+      filter.isDeleted = { $ne: true };
+      if (req.query.status === 'active')    filter.punchOut = null;
+      if (req.query.status === 'completed') filter.punchOut = { $ne: null };
+    }
 
     const records = await Volunteer.find(filter).sort({ punchIn: -1 });
     res.json({ total: records.length, records });
@@ -48,14 +53,14 @@ router.get('/stats', async (req, res) => {
     const today = new Date().toLocaleDateString();
 
     const [total, active, todayCount, completed] = await Promise.all([
-      Volunteer.countDocuments(),
-      Volunteer.countDocuments({ punchOut: null }),
-      Volunteer.countDocuments({ date: today }),
-      Volunteer.countDocuments({ punchOut: { $ne: null } })
+      Volunteer.countDocuments({ isDeleted: { $ne: true } }),
+      Volunteer.countDocuments({ punchOut: null, isDeleted: { $ne: true } }),
+      Volunteer.countDocuments({ date: today, isDeleted: { $ne: true } }),
+      Volunteer.countDocuments({ punchOut: { $ne: null }, isDeleted: { $ne: true } })
     ]);
 
     // Average duration of completed sessions
-    const done = await Volunteer.find({ punchOut: { $ne: null } }, 'punchIn punchOut');
+    const done = await Volunteer.find({ punchOut: { $ne: null }, isDeleted: { $ne: true } }, 'punchIn punchOut');
     const avgMs = done.length
       ? done.reduce((sum, r) => sum + (new Date(r.punchOut) - new Date(r.punchIn)), 0) / done.length
       : 0;
@@ -130,6 +135,36 @@ router.put('/:id/punchout', async (req, res) => {
 
     console.log(`  🚪 PUNCH OUT — ${record.fullName} (${record._id}) — ${record.duration}`);
     res.json({ message: 'Punched out successfully', record });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/volunteers/:id/trash
+ * Move a record to the trash bin.
+ */
+router.put('/:id/trash', async (req, res) => {
+  try {
+    const record = await Volunteer.findByIdAndUpdate(req.params.id, { isDeleted: true, deletedAt: new Date() }, { new: true });
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+    console.log(`  🗑️  MOVED TO TRASH — ${record.fullName} (${record._id})`);
+    res.json({ message: 'Record moved to trash', record });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/volunteers/:id/restore
+ * Restore a record from the trash bin.
+ */
+router.put('/:id/restore', async (req, res) => {
+  try {
+    const record = await Volunteer.findByIdAndUpdate(req.params.id, { isDeleted: false, deletedAt: null }, { new: true });
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+    console.log(`  ♻️  RESTORED — ${record.fullName} (${record._id})`);
+    res.json({ message: 'Record restored', record });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

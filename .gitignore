@@ -1,0 +1,13 @@
+# Node modules — do NOT commit
+node_modules/
+
+# Environment files
+.env
+.env.local
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*

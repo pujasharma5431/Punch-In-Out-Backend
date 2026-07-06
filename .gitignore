@@ -1,9 +1,10 @@
-# Node modules — do NOT commit
+# Node modules
 node_modules/
 
-# Environment files
+# Environment — NEVER commit this
 .env
 .env.local
+.env.*.local
 
 # macOS
 .DS_Store
@@ -11,3 +12,6 @@ node_modules/
 # Logs
 *.log
 npm-debug.log*
+
+# Data folder (no longer needed — using MongoDB)
+data/

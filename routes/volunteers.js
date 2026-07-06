@@ -1,47 +1,16 @@
-// ────────────────────────────────────────────────────
-//  volunteers.js  —  All volunteer data operations
-//  Storage: /backend/data/records.json  (flat-file DB)
-// ────────────────────────────────────────────────────
-const express = require('express');
-const fs      = require('fs');
-const path    = require('path');
-const { v4: uuidv4 } = require('uuid');
+// ────────────────────────────────────────────────────────────────
+//  volunteers.js  —  All volunteer API routes (MongoDB version)
+// ────────────────────────────────────────────────────────────────
+const express   = require('express');
+const Volunteer = require('../models/Volunteer');
 
-const router   = express.Router();
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const DB_PATH  = path.join(DATA_DIR, 'records.json');
+const router = express.Router();
 
-// ── File helpers ─────────────────────────────────────
+// ── Utility ──────────────────────────────────────────────────────
 
-/** Ensure the data directory and file exist */
-function ensureDB() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DB_PATH))  fs.writeFileSync(DB_PATH, JSON.stringify([], null, 2));
-}
-
-/** Read all records from disk */
-function readRecords() {
-  ensureDB();
-  try {
-    return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  } catch {
-    return [];
-  }
-}
-
-/** Write records array to disk */
-function writeRecords(records) {
-  ensureDB();
-  fs.writeFileSync(DB_PATH, JSON.stringify(records, null, 2));
-}
-
-// ── Utility ──────────────────────────────────────────
-
-/** Calculate duration string from two timestamps */
-function calcDuration(inTs, outTs) {
-  if (!outTs) return null;
-  const ms       = outTs - inTs;
-  const totalSec = Math.floor(ms / 1000);
+function calcDuration(inDate, outDate) {
+  if (!outDate) return null;
+  const totalSec = Math.floor((new Date(outDate) - new Date(inDate)) / 1000);
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
@@ -50,162 +19,150 @@ function calcDuration(inTs, outTs) {
   return `${s}s`;
 }
 
-// ── Routes ───────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────
 
 /**
  * GET /api/volunteers
- * Returns all records, newest first.
- * Query: ?status=active|completed  (optional filter)
+ * All records, newest first.
+ * ?status=active | completed
  */
-router.get('/', (req, res) => {
-  let records = readRecords();
+router.get('/', async (req, res) => {
+  try {
+    const filter = {};
+    if (req.query.status === 'active')    filter.punchOut = null;
+    if (req.query.status === 'completed') filter.punchOut = { $ne: null };
 
-  if (req.query.status === 'active')    records = records.filter(r => !r.punchOut);
-  if (req.query.status === 'completed') records = records.filter(r =>  r.punchOut);
-
-  // Sort newest first
-  records.sort((a, b) => b.punchIn - a.punchIn);
-
-  res.json({
-    total:  records.length,
-    records
-  });
+    const records = await Volunteer.find(filter).sort({ punchIn: -1 });
+    res.json({ total: records.length, records });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * GET /api/volunteers/stats
- * Summary stats for the admin dashboard.
+ * Summary counts for the admin dashboard.
  */
-router.get('/stats', (_req, res) => {
-  const records  = readRecords();
-  const today    = new Date().toLocaleDateString();
-  const active   = records.filter(r => !r.punchOut);
-  const todayRec = records.filter(r => r.date === today);
+router.get('/stats', async (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString();
 
-  // Average duration for completed sessions (ms)
-  const completed = records.filter(r => r.punchOut);
-  const avgMs = completed.length
-    ? completed.reduce((sum, r) => sum + (r.punchOut - r.punchIn), 0) / completed.length
-    : 0;
+    const [total, active, todayCount, completed] = await Promise.all([
+      Volunteer.countDocuments(),
+      Volunteer.countDocuments({ punchOut: null }),
+      Volunteer.countDocuments({ date: today }),
+      Volunteer.countDocuments({ punchOut: { $ne: null } })
+    ]);
 
-  res.json({
-    total:       records.length,
-    active:      active.length,
-    today:       todayRec.length,
-    completed:   completed.length,
-    averageDuration: calcDuration(0, avgMs) || '0s'
-  });
+    // Average duration of completed sessions
+    const done = await Volunteer.find({ punchOut: { $ne: null } }, 'punchIn punchOut');
+    const avgMs = done.length
+      ? done.reduce((sum, r) => sum + (new Date(r.punchOut) - new Date(r.punchIn)), 0) / done.length
+      : 0;
+
+    res.json({
+      total, active, today: todayCount, completed,
+      averageDuration: calcDuration(0, new Date(avgMs)) || '0s'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * GET /api/volunteers/:id
- * Fetch a single volunteer record by ID.
+ * Single record by MongoDB _id.
  */
-router.get('/:id', (req, res) => {
-  const records = readRecords();
-  const record  = records.find(r => r.id === req.params.id);
-  if (!record) return res.status(404).json({ error: 'Record not found' });
-  res.json(record);
+router.get('/:id', async (req, res) => {
+  try {
+    const record = await Volunteer.findById(req.params.id);
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+    res.json(record);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * POST /api/volunteers/punchin
  * Body: { fullName, email, phone }
- * Creates a new check-in record.
  */
-router.post('/punchin', (req, res) => {
-  const { fullName, email, phone } = req.body;
+router.post('/punchin', async (req, res) => {
+  try {
+    const { fullName, email, phone } = req.body;
 
-  // Validate required fields
-  const missing = [];
-  if (!fullName || fullName.trim().length < 2) missing.push('fullName');
-  if (!email    || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) missing.push('email');
-  if (!phone    || phone.replace(/\D/g, '').length < 7) missing.push('phone');
+    // Validate
+    const missing = [];
+    if (!fullName || fullName.trim().length < 2)                      missing.push('fullName');
+    if (!email    || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) missing.push('email');
+    if (!phone    || phone.replace(/\D/g, '').length < 7)             missing.push('phone');
+    if (missing.length) return res.status(400).json({ error: 'Validation failed', missing });
 
-  if (missing.length) {
-    return res.status(400).json({ error: 'Validation failed', missing });
+    const now = new Date();
+    const record = await Volunteer.create({
+      fullName: fullName.trim(),
+      email:    email.trim().toLowerCase(),
+      phone:    phone.trim(),
+      punchIn:  now,
+      punchOut: null,
+      date:     now.toLocaleDateString()
+    });
+
+    console.log(`  ✅ PUNCH IN  — ${record.fullName} (${record._id})`);
+    res.status(201).json({ message: 'Punched in successfully', record });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const now    = Date.now();
-  const record = {
-    id:        uuidv4(),
-    fullName:  fullName.trim(),
-    email:     email.trim().toLowerCase(),
-    phone:     phone.trim(),
-    punchIn:   now,
-    punchOut:  null,
-    date:      new Date(now).toLocaleDateString(),
-    createdAt: new Date(now).toISOString()
-  };
-
-  const records = readRecords();
-  records.push(record);
-  writeRecords(records);
-
-  console.log(`  ✅ PUNCH IN  — ${record.fullName} (${record.id})`);
-  res.status(201).json({ message: 'Punched in successfully', record });
 });
 
 /**
  * PUT /api/volunteers/:id/punchout
- * Marks the volunteer as punched out.
- * Returns 400 if already punched out.
  */
-router.put('/:id/punchout', (req, res) => {
-  const records = readRecords();
-  const index   = records.findIndex(r => r.id === req.params.id);
+router.put('/:id/punchout', async (req, res) => {
+  try {
+    const record = await Volunteer.findById(req.params.id);
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+    if (record.punchOut) return res.status(400).json({ error: 'Already punched out', punchOut: record.punchOut });
 
-  if (index === -1) {
-    return res.status(404).json({ error: 'Record not found' });
+    record.punchOut = new Date();
+    record.duration = calcDuration(record.punchIn, record.punchOut);
+    await record.save();
+
+    console.log(`  🚪 PUNCH OUT — ${record.fullName} (${record._id}) — ${record.duration}`);
+    res.json({ message: 'Punched out successfully', record });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const record = records[index];
-
-  if (record.punchOut) {
-    return res.status(400).json({
-      error: 'Already punched out',
-      punchOut: record.punchOut
-    });
-  }
-
-  record.punchOut  = Date.now();
-  record.duration  = calcDuration(record.punchIn, record.punchOut);
-  records[index]   = record;
-  writeRecords(records);
-
-  console.log(`  🚪 PUNCH OUT — ${record.fullName} (${record.id}) — ${record.duration}`);
-  res.json({ message: 'Punched out successfully', record });
 });
 
 /**
  * DELETE /api/volunteers
- * Clears ALL records (admin only — requires confirmation header).
+ * Clear ALL records (requires confirmation header).
  */
-router.delete('/', (req, res) => {
+router.delete('/', async (req, res) => {
   if (req.headers['x-confirm-delete'] !== 'yes') {
-    return res.status(403).json({
-      error: 'Missing confirmation header',
-      hint: 'Send header: x-confirm-delete: yes'
-    });
+    return res.status(403).json({ error: 'Send header: x-confirm-delete: yes' });
   }
-  writeRecords([]);
-  console.log('  🗑️  ALL RECORDS CLEARED');
-  res.json({ message: 'All records cleared' });
+  try {
+    await Volunteer.deleteMany({});
+    console.log('  🗑️  ALL RECORDS CLEARED');
+    res.json({ message: 'All records cleared' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * DELETE /api/volunteers/:id
- * Delete a single record by ID.
  */
-router.delete('/:id', (req, res) => {
-  const records = readRecords();
-  const index   = records.findIndex(r => r.id === req.params.id);
-
-  if (index === -1) return res.status(404).json({ error: 'Record not found' });
-
-  const [deleted] = records.splice(index, 1);
-  writeRecords(records);
-  res.json({ message: 'Record deleted', deleted });
+router.delete('/:id', async (req, res) => {
+  try {
+    const deleted = await Volunteer.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Record not found' });
+    res.json({ message: 'Record deleted', deleted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
